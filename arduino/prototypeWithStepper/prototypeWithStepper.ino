@@ -44,6 +44,8 @@ const uint8_t fsmStepper[stepperStateCnt][stepperPinCnt]={
 int32_t stepperPos[2]={0,0};
 int32_t stepperPosDelta[2]={0,0};
 int32_t stepperPosReal[2]={0,0};
+#define STEPPER_H 0
+#define STEPPER_V 1
 
 //==Magnet==
 const uint8_t pinMagnet[2] = {46,44};
@@ -55,6 +57,12 @@ const uint8_t photoDiodeCnt = 4;
 const uint8_t photoDiodePin[photoDiodeCnt] = {A0,A1,A2,A3};
 uint16_t photoDiodeValueBefore[photoDiodeCnt] = {0,0,0,0};
 uint16_t photoDiodeValueAfter[photoDiodeCnt] = {0,0,0,0};
+// 1 4
+// 2 3
+#define PD_LEFT_UP 0
+#define PD_LEFT_DOWN 1
+#define PD_RIGHT_DOWN 2
+#define PD_RIGHT_UP 3
 
 //==DebugPin==
 const uint8_t debugPin = 23;
@@ -158,8 +166,6 @@ void loop(){
   servoV.write(67-35+180.0/PI*atan(175.0*cos(angle)/235.0));
   */
 
-  updateStepper(0);
-  updateStepper(1);
   if(loopCnt % 10 == 0){
     updateKnobEncoder(0);
     updateKnobEncoder(1);
@@ -169,35 +175,77 @@ void loop(){
     knobEncoderPos[1] = 0;
   }
   readPhotodiodes();
+  
+
+  int16_t diodeLU = max(0,(int16_t)photoDiodeValueAfter[PD_LEFT_UP]-(int16_t)photoDiodeValueBefore[PD_LEFT_UP]);
+  int16_t diodeLD = max(0,(int16_t)photoDiodeValueAfter[PD_LEFT_DOWN]-(int16_t)photoDiodeValueBefore[PD_LEFT_DOWN]);
+  int16_t diodeRU = max(0,(int16_t)photoDiodeValueAfter[PD_RIGHT_UP]-(int16_t)photoDiodeValueBefore[PD_RIGHT_UP]);
+  int16_t diodeRD = max(0,(int16_t)photoDiodeValueAfter[PD_RIGHT_DOWN]-(int16_t)photoDiodeValueBefore[PD_RIGHT_DOWN]);
+  int16_t horizontal = diodeLU+diodeLD-diodeRU-diodeRD;
+  int16_t vertical = diodeLU+diodeRU-diodeLD-diodeRD;
+  static double lowHor = 0;
+  const uint8_t lowPassGrade = 1;
+  const uint8_t triggerLevel = 250;
+  const uint8_t triggerLevelHigh = 500;
+  static uint8_t verDir = 0;
+  lowHor = (lowHor*lowPassGrade+horizontal)/(lowPassGrade+1);
+  static double lowVer = 0;
+  lowVer = (lowVer*lowPassGrade+vertical)/(lowPassGrade+1);
+  
+  if(loopCnt % (lowPassGrade+1) == 0){
+  if(lowVer > (verDir==1 ? triggerLevel : triggerLevelHigh)){
+    stepperPos[STEPPER_V]++;
+    verDir = 1;
+  }else if(lowVer < -(verDir==0 ? triggerLevel : triggerLevelHigh)){
+    stepperPos[STEPPER_V]--;
+    verDir = 0;
+  }
+  
+  if(lowHor > triggerLevel){
+    stepperPos[STEPPER_H]++;
+  }else if(lowHor < -triggerLevel){
+    stepperPos[STEPPER_H]--;
+  }
+  }
+  /*
   if(loopCnt % 1000 == 0){
-    for(int i = 0; i < photoDiodeCnt; i++){
-      Serial.print(photoDiodeValueBefore[i]);
-      Serial.print(" ");
-      Serial.print(photoDiodeValueAfter[i]);
-      Serial.print(" ");
-      Serial.println((int16_t)photoDiodeValueAfter[i]-(int16_t)photoDiodeValueBefore[i]);
-    }
+    Serial.print("LU ");
+    Serial.print(diodeLU);
+    Serial.print(" RU ");
+    Serial.println(diodeRU);
+    Serial.print("LD ");
+    Serial.print(diodeLD);
+    Serial.print(" RD ");
+    Serial.println(diodeRD);
+    Serial.println();
+    Serial.print(lowVer);
+    Serial.println(lowHor);
+    Serial.println();
     Serial.println();
   }
+  */
+  
+  updateStepper(0);
+  updateStepper(1);
+  
+  //delayMicroseconds(10);
 }
 
 
 //==PhotoDiodes==
 void readPhotodiodes(){
-  digitalWrite(pinLaser,LOW);
-  delayMicroseconds(1);
-  digitalWrite(debugPin,HIGH);
+  //digitalWrite(pinLaser,LOW);
+  //delayMicroseconds(2);
   for(int i = 0; i < photoDiodeCnt; i++){
     photoDiodeValueBefore[i] = analogRead(photoDiodePin[i]);
   }
-  digitalWrite(debugPin,LOW);
   digitalWrite(pinLaser,HIGH);
-  delayMicroseconds(1);
-  //digitalWrite(debugPin,HIGH);
+  delayMicroseconds(50);
+  digitalWrite(debugPin,HIGH);
   for(int i = 0; i < photoDiodeCnt; i++){
     photoDiodeValueAfter[i] = analogRead(photoDiodePin[i]);
   }
-  //digitalWrite(debugPin,LOW);
+  digitalWrite(debugPin,LOW);
   digitalWrite(pinLaser,LOW);
   //analogWrite(pinLaser,127);
 }
