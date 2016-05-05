@@ -41,15 +41,27 @@ const uint8_t fsmStepper[stepperStateCnt][stepperPinCnt]={
   {0,0,0,1},
   {1,0,0,1}
 };
-int stepperPos[2]={0,0};
-int stepperPosDelta[2]={0,0};
+int32_t stepperPos[2]={0,0};
+int32_t stepperPosDelta[2]={0,0};
+int32_t stepperPosReal[2]={0,0};
 
 //==Magnet==
 const uint8_t pinMagnet[2] = {46,44};
 const uint8_t pinMagnetPwm = 10;
 const uint8_t range = 20;
+
+//==PhotoDiode==
+const uint8_t photoDiodeCnt = 4;
+const uint8_t photoDiodePin[photoDiodeCnt] = {A0,A1,A2,A3};
+uint16_t photoDiodeValueBefore[photoDiodeCnt] = {0,0,0,0};
+uint16_t photoDiodeValueAfter[photoDiodeCnt] = {0,0,0,0};
+
+//==DebugPin==
+const uint8_t debugPin = 23;
   
 void setup() {
+  //==DebugPin==
+  pinMode(debugPin,OUTPUT);
   //==Laser==
   pinMode(pinLaser,OUTPUT);
   analogWrite(pinLaser,127);
@@ -132,34 +144,9 @@ void setup() {
   }
 }
 
-//==Magnet==
-void setMagnet(bool on, bool pull, uint8_t speed){
-    digitalWrite(pinMagnet[0],on && !pull);
-    digitalWrite(pinMagnet[1],on && pull);
-    analogWrite(pinMagnetPwm,speed);
-}
-
-//==Stepper==
-void updateStepper(uint8_t stepper){
-  int32_t pos = stepperPos[stepper] + stepperPosDelta[stepper];
-  int stepperState = pos % stepperStateCnt;
-  if(stepperState < 0){
-    stepperState += stepperStateCnt;
-  }
-  for(int i = 0; i < stepperPinCnt; i++){
-    digitalWrite(stepperPins[stepper][i],fsmStepper[stepperState][i]);
-    digitalWrite(stepperPins[stepper][i],fsmStepper[stepperState][i]);
-  }
-}
-
 uint32_t loopCnt = 0;
 void loop(){
-  /*
-  (Serial.available() >= 4){
-    char dir = Serial.parseInt();
-    int pos
-  }
-  */
+  loopCnt++;
   /*
   //Serial.println(position);
   //Length Pendulum:175mm
@@ -173,20 +160,73 @@ void loop(){
 
   updateStepper(0);
   updateStepper(1);
-  loopCnt++;
   if(loopCnt % 10 == 0){
     updateKnobEncoder(0);
     updateKnobEncoder(1);
-    //if(knobEncoderPos[0] != 0){
-    //  Serial.println(knobEncoderPos[0]);
-    //}
-    //Serial.println(knobEncoderPos[1]);
     stepperPosDelta[0] += knobEncoderPos[0];
     stepperPosDelta[1] += knobEncoderPos[1];
     knobEncoderPos[0] = 0;
     knobEncoderPos[1] = 0;
   }
-  //Serial.println(encoderPos);
+  readPhotodiodes();
+  if(loopCnt % 1000 == 0){
+    for(int i = 0; i < photoDiodeCnt; i++){
+      Serial.print(photoDiodeValueBefore[i]);
+      Serial.print(" ");
+      Serial.print(photoDiodeValueAfter[i]);
+      Serial.print(" ");
+      Serial.println((int16_t)photoDiodeValueAfter[i]-(int16_t)photoDiodeValueBefore[i]);
+    }
+    Serial.println();
+  }
+}
+
+
+//==PhotoDiodes==
+void readPhotodiodes(){
+  digitalWrite(pinLaser,LOW);
+  delayMicroseconds(1);
+  digitalWrite(debugPin,HIGH);
+  for(int i = 0; i < photoDiodeCnt; i++){
+    photoDiodeValueBefore[i] = analogRead(photoDiodePin[i]);
+  }
+  digitalWrite(debugPin,LOW);
+  digitalWrite(pinLaser,HIGH);
+  delayMicroseconds(1);
+  //digitalWrite(debugPin,HIGH);
+  for(int i = 0; i < photoDiodeCnt; i++){
+    photoDiodeValueAfter[i] = analogRead(photoDiodePin[i]);
+  }
+  //digitalWrite(debugPin,LOW);
+  digitalWrite(pinLaser,LOW);
+  //analogWrite(pinLaser,127);
+}
+
+//==Magnet==
+void setMagnet(bool on, bool pull, uint8_t speed){
+    digitalWrite(pinMagnet[0],on && !pull);
+    digitalWrite(pinMagnet[1],on && pull);
+    analogWrite(pinMagnetPwm,speed);
+}
+
+//==Stepper==
+void updateStepper(uint8_t stepper){
+  int32_t pos = stepperPos[stepper] + stepperPosDelta[stepper];
+  if(pos > stepperPosReal[stepper]){
+    pos--;
+  }else if(pos < stepperPosReal[stepper]){
+    pos++;
+  }else{
+    return;
+  }
+  int stepperState = pos % stepperStateCnt;
+  if(stepperState < 0){
+    stepperState += stepperStateCnt;
+  }
+  for(int i = 0; i < stepperPinCnt; i++){
+    digitalWrite(stepperPins[stepper][i],fsmStepper[stepperState][i]);
+    digitalWrite(stepperPins[stepper][i],fsmStepper[stepperState][i]);
+  }
 }
 
 void updateKnobEncoder(uint8_t nr){
@@ -216,8 +256,8 @@ void incrementEncoder(){
   unsigned long newTime = micros();
   lastEncoderTimeDiff = newTime - lastEncoderTime;
   lastEncoderTime = newTime;
-  stepperPos[0]=-(int)(encoderPos/2);
-  stepperPos[1]= -abs((int)(encoderPos/4));
+  //stepperPos[0]=-(int)(encoderPos/2);
+  //stepperPos[1]= -abs((int)(encoderPos/4));
 
   for(uint8_t i = 0; i < ledCnt;i++){
     digitalWrite(ledPins[i],(ledCnt-i)*5 > abs(encoderPos));
