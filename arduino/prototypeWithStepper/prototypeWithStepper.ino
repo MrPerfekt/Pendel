@@ -1,4 +1,5 @@
-//#include<Servo.h>
+#define APPROXIMATION
+//#define DIODE_SEARCH
 
 //==Laser==
 const uint8_t pinLaser = 11;
@@ -18,6 +19,7 @@ int encoderPos=0;
 //==KnobEncoder==
 const uint8_t knobCnt = 2;
 const uint8_t knobEncoderPin[knobCnt][2]={{28,26},{24,22}};
+const uint8_t knobEncoderButtonPin[knobCnt]={25,27};
 uint8_t knobEncoderLastState[knobCnt][2]={{0,0},{0,0}};
 int32_t knobEncoderPos[knobCnt];
 
@@ -41,9 +43,9 @@ const uint8_t fsmStepper[stepperStateCnt][stepperPinCnt]={
   {0,0,0,1},
   {1,0,0,1}
 };
-int32_t stepperPos[2]={0,0};
-int32_t stepperPosDelta[2]={0,0};
-int32_t stepperPosReal[2]={0,0};
+volatile int32_t stepperPos[2]={0,0};
+volatile int32_t stepperPosDelta[2]={0,0};
+volatile int32_t stepperPosReal[2]={0,0};
 #define STEPPER_H 0
 #define STEPPER_V 1
 
@@ -66,169 +68,196 @@ uint16_t photoDiodeValueAfter[photoDiodeCnt] = {0,0,0,0};
 
 //==DebugPin==
 const uint8_t debugPin = 23;
+
+//==IRQ==
+void startTimer(Tc *tc, uint32_t channel, IRQn_Type irq, uint32_t frequency) {
+        pmc_set_writeprotect(false);
+        pmc_enable_periph_clk((uint32_t)irq);
+        TC_Configure(tc, channel, TC_CMR_WAVE | TC_CMR_WAVSEL_UP_RC | TC_CMR_TCCLKS_TIMER_CLOCK4);
+        uint32_t rc = VARIANT_MCK/128/frequency; //128 because we selected TIMER_CLOCK4 above
+        TC_SetRA(tc, channel, rc/2); //50% high, 50% low
+        TC_SetRC(tc, channel, rc);
+        TC_Start(tc, channel);
+        tc->TC_CHANNEL[channel].TC_IER=TC_IER_CPCS;
+        tc->TC_CHANNEL[channel].TC_IDR=~TC_IER_CPCS;
+        NVIC_EnableIRQ(irq);
+}
+/*
+ISR/IRQ TC          Channel Due pins
+TC0 TC0 0 2, 13
+TC1 TC0 1 60, 61
+TC2 TC0 2 58
+TC3 TC1 0 none  <- this line in the example above
+TC4 TC1 1 none
+TC5 TC1 2 none
+TC6 TC2 0 4, 5
+TC7 TC2 1 3, 10
+TC8 TC2 2 11, 12
+ */
   
 void setup() {  
   //==DebugPin==
   pinMode(debugPin,OUTPUT);
+  
   //==Laser==
   pinMode(pinLaser,OUTPUT);
-  analogWrite(pinLaser,127);
-  TCCR1B = (TCCR1B & ~0b111) | 2;
-  //Setting   Divisor   Frequency
-  //0x01    1     31372.55
-  //0x02    8     3921.16
-  //0x03      64    490.20   <--DEFAULT
-  //0x04      256     122.55
-  //0x05    1024    30.64
-  //TCCR1B = (TCCR1B & 0b11111000) | <setting>;
+  //analogWrite(pinLaser,127);
   
   //==LEDs==
   for(uint8_t i = 0; i < ledCnt;i++){
     pinMode(ledPins[i], OUTPUT);
     digitalWrite(ledPins[i], LOW);
   }
-  /*
-  while(1){
-    static bool on = false;
-    for(uint8_t i = 0; i < ledCnt;i++){
-      digitalWrite(ledPins[i],on);
-      delay(100);
-    }
-    on = !on;
-  }
-  */
   
   //==Magnet==
   pinMode(pinMagnet[0], OUTPUT);
   pinMode(pinMagnet[1], OUTPUT);
   pinMode(pinMagnetPwm, OUTPUT);
-  TCCR2B = (TCCR2B & 0b11111000) | 1;
-  /*
-  Setting   Divisor   Frequency
-  0x01    1     31372.55
-  0x02    8     3921.16
-  0x03      64    490.20   <--DEFAULT
-  0x04      256     122.55
-  0x05    1024    30.64
-  TCCR1B = (TCCR1B & 0b11111000) | <setting>;
-  */
 
-  /*
-  //Test Magnet Code
-  //digitalWrite(pinMagnetPwm,HIGH);
-  while(1){
-    setMagnet(true,false,200); //Push
-    delay(1000);
-    setMagnet(true,true,200); //Push
-    delay(1000);
-  }
-  */
-  
-  /*
-  //==Example Stepper Code==
-  for(int i = 0; i < stepperPinCnt; i++){
-    pinMode(stepperPins[i], OUTPUT);
-  }
-  while(1){
-    stepperPos++;
-    updateStepper();
-    delayMicroseconds(1500);
-  }
-  */
-  
+  //==Serial==
   Serial.begin(9600);
+  
   //==Encoder==
   pinMode(pinEncoderA, INPUT);
   pinMode(pinEncoderB, INPUT);
   attachInterrupt(digitalPinToInterrupt(pinEncoderA), incrementEncoder, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pinEncoderB), incrementEncoder, CHANGE);
+  
   ////==Servo==
   //servoH.attach(pinServoV);
   //servoV.attach(pinServoH);
+  
   //==Stepper==
   for(int i = 0; i < stepperPinCnt; i++){
     pinMode(stepperPins[0][i], OUTPUT);
     pinMode(stepperPins[1][i], OUTPUT);
   }
+  startTimer(TC1, 0, TC3_IRQn, 900);
 }
 
+// -120, -100, -80, -60, -40, -20, 0, 20, 40, 60, 80, 100
+#define VALUES_V 0
+#define VALUES_H 1
+const int32_t encoderPosValues[12][2] = {{-20,68},{-15,57},{-10,46},{-7,34},{-4,22},{-2,11},{-3,0},{-4,-13},{-8,-26},{-12,-38},{-17,-48},{-23,-60}};
+//RAW: const int32_t encoderPosValues[12][2] = {{-13,68},{-8,67},{-3,46},{0,34},{3,22},{5,11},{0,0},{-4,-13},{-8,-26},{-12,-38},{-17,-48},{-23,-60}};
 uint32_t loopCnt = 0;
 void loop(){
   loopCnt++;
+
   /*
-  //Serial.println(position);
-  //Length Pendulum:175mm
-  //Length Encoder 75mm
-  //Distanze Pendulum 235mm
-  double speedAngle = 0 * min(max(lastEncoderTimeDiff/1000,30),-30);
-  double angle = 45.0/180.0*(encoderPos+speedAngle)*PI/180.0;
-  servoH.write(90+180.0/PI*atan(175.0*sin(-angle)/235.0));
-  servoV.write(67-35+180.0/PI*atan(175.0*cos(angle)/235.0));
+  //Stepper Speed Test
+  //900-1200
+  stepperPosDelta[STEPPER_V] = 100000;
+  updateKnobEncoder(0);
+  if(knobEncoderPos[0] != 0){
+    static uint32_t frequency = 900;
+    frequency += knobEncoderPos[0];
+    knobEncoderPos[0] = 0;
+    startTimer(TC1, 0, TC3_IRQn, frequency);
+    Serial.println(frequency);
+  }
+  //updateStepper(STEPPER_V);
+  delay(1);
+  return;
   */
 
+    
   if(loopCnt % 10 == 0){
     updateKnobEncoder(0);
     updateKnobEncoder(1);
-    stepperPosDelta[0] += knobEncoderPos[0];
-    stepperPosDelta[1] += knobEncoderPos[1];
+//    stepperPos[STEPPER_H] += knobEncoderPos[0];
+//    stepperPos[STEPPER_V] += knobEncoderPos[1];
+    stepperPosDelta[STEPPER_H] += knobEncoderPos[0];
+    stepperPosDelta[STEPPER_V] += knobEncoderPos[1];
     knobEncoderPos[0] = 0;
     knobEncoderPos[1] = 0;
   }
   readPhotodiodes();
+
+  if(digitalRead(knobEncoderButtonPin[0])==LOW){
+  }
+  if(digitalRead(knobEncoderButtonPin[1])==LOW){
+  }
   
 
-  int16_t diodeLU = max(0,(int16_t)photoDiodeValueAfter[PD_LEFT_UP]-(int16_t)photoDiodeValueBefore[PD_LEFT_UP]);
-  int16_t diodeLD = max(0,(int16_t)photoDiodeValueAfter[PD_LEFT_DOWN]-(int16_t)photoDiodeValueBefore[PD_LEFT_DOWN]);
-  int16_t diodeRU = max(0,(int16_t)photoDiodeValueAfter[PD_RIGHT_UP]-(int16_t)photoDiodeValueBefore[PD_RIGHT_UP]);
-  int16_t diodeRD = max(0,(int16_t)photoDiodeValueAfter[PD_RIGHT_DOWN]-(int16_t)photoDiodeValueBefore[PD_RIGHT_DOWN]);
-  int16_t horizontal = diodeLU+diodeLD-diodeRU-diodeRD;
-  int16_t vertical = diodeLU+diodeRU-diodeLD-diodeRD;
-  static double lowHor = 0;
-  const uint8_t lowPassGrade = 1;
-  const uint8_t triggerLevel = 250;
-  const uint8_t triggerLevelHigh = 500;
-  static uint8_t verDir = 0;
-  lowHor = (lowHor*lowPassGrade+horizontal)/(lowPassGrade+1);
-  static double lowVer = 0;
-  lowVer = (lowVer*lowPassGrade+vertical)/(lowPassGrade+1);
+#ifdef DIODE_SEARCH
+//int32_t encoderStepperPos[2000][2];
+//  if(!buttonPressed){
+    int16_t diodeLU = max(0,(int16_t)photoDiodeValueAfter[PD_LEFT_UP]-(int16_t)photoDiodeValueBefore[PD_LEFT_UP]);
+    int16_t diodeLD = max(0,(int16_t)photoDiodeValueAfter[PD_LEFT_DOWN]-(int16_t)photoDiodeValueBefore[PD_LEFT_DOWN]);
+    int16_t diodeRU = max(0,(int16_t)photoDiodeValueAfter[PD_RIGHT_UP]-(int16_t)photoDiodeValueBefore[PD_RIGHT_UP]);
+    int16_t diodeRD = max(0,(int16_t)photoDiodeValueAfter[PD_RIGHT_DOWN]-(int16_t)photoDiodeValueBefore[PD_RIGHT_DOWN]);
+    int16_t horizontal = diodeLU+diodeLD-diodeRU-diodeRD;
+    int16_t vertical = diodeLU+diodeRU-diodeLD-diodeRD;
+    
+    static double lowHor = 0;
+    const uint8_t lowPassGrade = 21;//19;
+    const uint8_t triggerLevel = 80;
+    static uint8_t verDir = 0;
+    lowHor = (lowHor*lowPassGrade+horizontal)/(lowPassGrade+1);
+    static double lowVer = 0;
+    lowVer = (lowVer*lowPassGrade+vertical)/(lowPassGrade+1);
   
-  if(loopCnt % (lowPassGrade+1) == 0){
-  if(lowVer > (verDir==1 ? triggerLevel : triggerLevelHigh)){
-    stepperPos[STEPPER_V]++;
-    verDir = 1;
-  }else if(lowVer < -(verDir==0 ? triggerLevel : triggerLevelHigh)){
-    stepperPos[STEPPER_V]--;
-    verDir = 0;
-  }
+//    static double stepperPosV = 0;
+//    static double stepperPosH = 0;
+//    double incrementValue = 1;
+    if(loopCnt % (lowPassGrade+1) == 0){
+      if(lowVer > triggerLevel){
+//        stepperPosV += incrementValue;
+//        stepperPos[STEPPER_V] = (int32_t)stepperPosV;
+        stepperPos[STEPPER_V]++;
+      }else if(lowVer < -triggerLevel){
+//        stepperPosV -= incrementValue;
+//        stepperPos[STEPPER_V] = (int32_t)stepperPosV;
+        stepperPos[STEPPER_V]--;
+      }
+      
+      if(lowHor > triggerLevel){
+//        stepperPosH += incrementValue;
+//        stepperPos[STEPPER_H] = (int32_t)stepperPosH;
+        stepperPos[STEPPER_H]++;
+      }else if(lowHor < -triggerLevel){
+//        stepperPosH -= incrementValue;
+//        stepperPos[STEPPER_H] = (int32_t)stepperPosH;
+        stepperPos[STEPPER_H]--;
+      }
+//      if(abs(encoderPos) < 999){
+//        const int lowPassGradeEncoder = 20;
+//        encoderStepperPos[encoderPos+1000][STEPPER_H] = (encoderStepperPos[encoderPos+1000][STEPPER_H]*lowPassGradeEncoder + stepperPos[STEPPER_H])/(lowPassGradeEncoder+1);
+//        encoderStepperPos[encoderPos+1000][STEPPER_V] = (encoderStepperPos[encoderPos+1000][STEPPER_V]*lowPassGradeEncoder + stepperPos[STEPPER_V])/(lowPassGradeEncoder+1);
+//      }
+    }
+//  }else{
+//      if(abs(encoderPos) < 999){
+//        stepperPos[STEPPER_H] = encoderStepperPos[encoderPos+1000][STEPPER_H];
+//        stepperPos[STEPPER_V] = encoderStepperPos[encoderPos+1000][STEPPER_V];
+//      }
+//  }
+#endif
+#ifdef APPROXIMATION
+  int32_t pos = min(100,max(-119,encoderPos));
+  uint8_t index0 = (pos+120)/20;
+  uint8_t index1 = index0+1;
+  int32_t deltaPos = (pos+120) % 20;
   
-  if(lowHor > triggerLevel){
-    stepperPos[STEPPER_H]++;
-  }else if(lowHor < -triggerLevel){
-    stepperPos[STEPPER_H]--;
-  }
-  }
-  /*
-  if(loopCnt % 1000 == 0){
-    Serial.print("LU ");
-    Serial.print(diodeLU);
-    Serial.print(" RU ");
-    Serial.println(diodeRU);
-    Serial.print("LD ");
-    Serial.print(diodeLD);
-    Serial.print(" RD ");
-    Serial.println(diodeRD);
-    Serial.println();
-    Serial.print(lowVer);
-    Serial.println(lowHor);
-    Serial.println();
-    Serial.println();
-  }
-  */
+  int32_t stepperBaseH = encoderPosValues[index0][VALUES_H];
+  int32_t stepperBaseV = encoderPosValues[index0][VALUES_V];
   
-  updateStepper(0);
-  updateStepper(1);
-  
-  //delayMicroseconds(10);
+  int32_t stepperRiseH = encoderPosValues[index1][VALUES_H] - stepperBaseH;
+  int32_t stepperRiseV = encoderPosValues[index1][VALUES_V] - stepperBaseV;
+
+  stepperPos[STEPPER_H] = stepperBaseH + (stepperRiseH * deltaPos) / 20;
+  stepperPos[STEPPER_V] = stepperBaseV + (stepperRiseV * deltaPos) / 20;
+  if(loopCnt % 10000 == 0){
+    Serial.print(encoderPos);
+    Serial.print(" ");
+    Serial.print(deltaPos);
+    Serial.print(" ");
+    Serial.print(stepperBaseH + (stepperRiseH * deltaPos) / 20);
+    Serial.print(" ");
+    Serial.println(stepperBaseV + (stepperRiseV * deltaPos) / 20);
+  }
+#endif
 }
 
 
@@ -236,6 +265,7 @@ void loop(){
 void readPhotodiodes(){
   //digitalWrite(pinLaser,LOW);
   //delayMicroseconds(2);
+  digitalWrite(debugPin,LOW);
   for(int i = 0; i < photoDiodeCnt; i++){
     photoDiodeValueBefore[i] = analogRead(photoDiodePin[i]);
   }
@@ -245,7 +275,6 @@ void readPhotodiodes(){
   for(int i = 0; i < photoDiodeCnt; i++){
     photoDiodeValueAfter[i] = analogRead(photoDiodePin[i]);
   }
-  digitalWrite(debugPin,LOW);
   digitalWrite(pinLaser,LOW);
   //analogWrite(pinLaser,127);
 }
@@ -258,21 +287,28 @@ void setMagnet(bool on, bool pull, uint8_t speed){
 }
 
 //==Stepper==
+void TC3_Handler() {
+  TC_GetStatus(TC1, 0);
+  updateStepper(STEPPER_H);
+  updateStepper(STEPPER_V);
+}
 void updateStepper(uint8_t stepper){
   int32_t pos = stepperPos[stepper] + stepperPosDelta[stepper];
   if(pos > stepperPosReal[stepper]){
-    pos--;
+    stepperPosReal[stepper]++;
   }else if(pos < stepperPosReal[stepper]){
-    pos++;
+    stepperPosReal[stepper]--;
   }else{
+    for(int i = 0; i < stepperPinCnt; i++){
+      //digitalWrite(stepperPins[stepper][i],LOW);
+    }
     return;
   }
-  int stepperState = pos % stepperStateCnt;
+  int stepperState = stepperPosReal[stepper] % stepperStateCnt;
   if(stepperState < 0){
     stepperState += stepperStateCnt;
   }
   for(int i = 0; i < stepperPinCnt; i++){
-    digitalWrite(stepperPins[stepper][i],fsmStepper[stepperState][i]);
     digitalWrite(stepperPins[stepper][i],fsmStepper[stepperState][i]);
   }
 }
