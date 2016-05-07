@@ -67,13 +67,13 @@ uint16_t photoDiodeValueAfter[photoDiodeCnt] = {0,0,0,0};
 //==DebugPin==
 const uint8_t debugPin = 23;
   
-void setup() {
+void setup() {  
   //==DebugPin==
   pinMode(debugPin,OUTPUT);
   //==Laser==
   pinMode(pinLaser,OUTPUT);
   analogWrite(pinLaser,127);
-   TCCR1B = (TCCR1B & ~0b111) | 2;
+  TCCR1B = (TCCR1B & ~0b111) | 2;
   //Setting   Divisor   Frequency
   //0x01    1     31372.55
   //0x02    8     3921.16
